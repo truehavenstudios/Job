@@ -494,8 +494,6 @@ html[data-dark="1"] .nav.on svg{color:var(--a2)}
 .main{padding:30px 40px 120px;max-width:1180px}
 .topbar{align-items:flex-end;margin-bottom:24px}
 .topbar .sub{font-size:.82em;color:var(--ink2);margin:0 0 4px}
-.banner{background:var(--ink);color:var(--bg);font-size:.82em;padding:7px 16px}
-.banner a{color:inherit}
 
 /* cards */
 .card{border-radius:var(--r);box-shadow:none;border:1px solid var(--line)}
@@ -1554,7 +1552,7 @@ function shell(content) {
   const r = route(), n = todos().length;
   const nav = NAV.map(([, items], gi) => (gi ? `<div class="navsep"></div>` : "") + items.map(([id, name, icon]) =>
     `<a class="nav ${r === id ? "on" : ""}" href="#/${id}">${ic(icon)}<span>${name}</span>${id === "today" && n ? `<span class="count">${n}</span>` : ""}</a>`).join("")).join("");
-  const demo = DEMO ? `<div class="banner">Free demo – nothing you type is saved. <a href="${esc(window.BP_SHOP)}" target="_blank" rel="noopener">Get the full app on Etsy</a></div>` : "";
+  const demo = DEMO ? `<div class="banner">You're trying the free demo – nothing you type is saved. <a href="${esc(window.BP_SHOP)}" target="_blank" rel="noopener">Get the full app on Etsy</a></div>` : "";
   const tab = (id, nm, i) => `<a href="#/${id}" class="${r === id ? "on" : ""}">${ic(i)}${nm}</a>`;
   return `${demo}<div class="app"><aside class="side">
     <div class="brand">${ARCH}<b>Job Tracker</b><span>TrueHaven Studios</span></div>
@@ -2063,7 +2061,7 @@ function vSettings() {
     <p class="help">Coming from a spreadsheet tracker? In Google Sheets choose File › Download › CSV, in Excel File › Save As › CSV – then import it here. Columns like Company, Job title, Status and Date applied are recognized automatically.</p>
     <div class="row wrap mt"><button class="btn" data-act="backup">${ic("down")}Download a backup</button><button class="btn" data-act="restore">${ic("up")}Restore a backup</button><button class="btn" data-act="icsAll">${ic("bell")}Calendar file (.ics)</button></div>
     <p class="help">${S.lastBackup ? "Last backup: " + rel(S.lastBackup) + ". " : ""}${cloudOn() ? "A copy is saved in your own Google Drive automatically." : "Your data is saved in this browser on this device."}</p>
-    <div class="row wrap mt"><button class="btn danger" data-act="resetAll">${ic("trash")}Start fresh</button></div>`;
+    ${DEMO ? "" : `<div class="row wrap mt"><button class="btn danger" data-act="resetAll">${ic("trash")}Start fresh</button></div>`}`;
   return topbar("Settings") + `<div class="grid g2 start">${card("You", you)}${card("Your rhythm", rhythm, { b: true })}</div>
     <div class="grid g2 mt start">${card("Google Drive backup & sync", googleCard())}${card("Your data", data, { b: true })}</div>
     <div class="grid g2 mt start">${card("Save jobs faster", captureCard())}${card("Look", look)}</div>
@@ -2241,9 +2239,9 @@ const ACT = {
   actDel: d => { commit(() => { S.acts = S.acts.filter(a => a.id !== d.id); }, "delete activity"); closeModal(); },
   // settings
   setTheme: d => { commit(() => { S.settings.theme = d.v; }); }, setDark: d => { commit(() => { S.settings.dark = d.v; }); }, setFs: d => { commit(() => { S.settings.fs = +d.v; }); },
-  csvIn: () => csvIn(), csvOk: () => csvOk(), csvOut: () => csvOut(), backup: () => backup(), restore: () => restore(),
+  csvIn: () => DEMO ? toast("Import works in the full app.") : csvIn(), csvOk: () => csvOk(), csvOut: () => csvOut(), backup: () => backup(), restore: () => restore(),
   restoreOk: () => { const c = S.cloud; commit(() => { S = RST; S.setup = true; S.cloud = c; if (S.cloud) S.cloud.dirty = true; }, "restore"); closeModal(); toast("Backup restored.", () => undo()); },
-  resetAll: () => modal("Start fresh?", `<p>This deletes every job and interview on this device${cloudOn() ? " and in your Google Drive copy" : ""}. Download a backup first if you might need it.</p>`, `<button class="btn" data-act="close">Cancel</button><button class="btn danger" data-act="resetOk">Delete everything</button>`),
+  resetAll: () => DEMO ? toast("This works in the full app – the demo can't be deleted.") : modal("Start fresh?", `<p>This deletes every job and interview on this device${cloudOn() ? " and in your Google Drive copy" : ""}. Download a backup first if you might need it.</p>`, `<button class="btn" data-act="close">Cancel</button><button class="btn danger" data-act="resetOk">Delete everything</button>`),
   resetOk: () => { const c = S.cloud; commit(() => { S = blank(); S.setup = true; S.cloud = c; if (c) c.dirty = true; }, "start fresh"); closeModal(); toast("Everything deleted.", () => undo()); },
   cloudConnect: () => cloudConnect(), cloudSync: () => cloudSyncNow(), cloudOff: () => cloudOff(),
   // onboarding
