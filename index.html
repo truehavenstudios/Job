@@ -721,7 +721,7 @@ details summary{cursor:pointer;color:var(--ink2)}
 @media (max-width:760px){.ch .chr .tiny{display:none}}
 </style></head>
 <body data-theme="Sage"><div id="root"></div>
-<script>window.BP_DEMO=true;window.BP_SHOP="https://www.etsy.com/shop/TrueHavenStudios";window.BP_VERSION="1.0.0";window.BP_GOOGLE_CLIENT_ID="978422515007-ilknnma9i8cbduoc5klk7m2j63k33sdb.apps.googleusercontent.com";window.BP_REQUIRE_LOGIN=true;</script>
+<script>window.BP_DEMO=true;window.BP_SHOP="https://www.etsy.com/shop/TrueHavenStudios";window.BP_VERSION="1.0.0";window.BP_GOOGLE_CLIENT_ID="";window.BP_REQUIRE_LOGIN=true;</script>
 <script>window.BP_SAMPLE_JD = `Product Marketing Manager – Verde Labs (Remote)\nVerde Labs is looking for a Product Marketing Manager to lead positioning and go-to-market for our sustainability platform.\n\nYou will:\n- Own launches end to end with product management and sales\n- Create messaging, sales enablement content and customer case studies\n- Run competitive analysis and market research\n- Partner with demand generation on campaigns, webinars and email marketing\n- Measure adoption with Amplitude and report on KPIs\n\nYou have:\n- 4+ years in product marketing for B2B SaaS\n- Excellent writing and presentation skills\n- Experience with pricing and packaging\n- Comfortable with data: SQL or Amplitude a plus\n- Bachelor's degree or equivalent experience`;
 /* demo data: a realistic job search, always relative to today (all companies are made up) */
 window.BP_SAMPLE = function () {
@@ -1565,7 +1565,7 @@ function shell(content) {
     <nav class="tabbar">${tab("today", "Today", "home")}${tab("board", "Board", "board")}<button class="fab" data-act="addApp" aria-label="Add a job">${ic("plus")}</button>${tab("calendar", "Calendar", "cal")}<button data-act="more" class="${["list", "interviews", "offers", "insights", "report", "settings"].includes(r) ? "on" : ""}">${ic("menu")}More</button></nav>`;
 }
 function footer() {
-  return `<footer class="sitefoot"><b>Job Application Tracker by TrueHaven Studios</b> – a job search app for phone and computer: board, daily to-do list, follow-up and interview reminders in your phone's calendar, saved job ads, interview notes, email templates, offer comparison and a job search log for unemployment benefits. In the full app you sign in with Google: your tracker is saved in a hidden app folder in <b>your own</b> Google Drive (scope drive.appdata) so it's never lost and stays in sync between your devices. The app can only see its own file, and nothing is sent to us. <a href="privacy.html">Privacy policy</a> · <a href="${esc(window.BP_SHOP)}" target="_blank" rel="noopener">TrueHaven Studios on Etsy</a></footer>`;
+  return `<footer class="sitefoot"><b>Job Application Tracker by TrueHaven Studios</b> – a job search app for phone and computer: board, daily to-do list, follow-up and interview reminders in your phone's calendar, saved job ads, interview notes, email templates, offer comparison and a job search log for unemployment benefits. ${GCLIENT ? `In the full app you sign in with Google: your tracker is saved in a hidden app folder in <b>your own</b> Google Drive (scope drive.appdata) so it's never lost and stays in sync between your devices. The app can only see its own file, and nothing is sent to us. ` : `Your tracker is saved on your device – no account, no server, and nothing is sent to us. `}<a href="privacy.html">Privacy policy</a> · <a href="${esc(window.BP_SHOP)}" target="_blank" rel="noopener">TrueHaven Studios on Etsy</a></footer>`;
 }
 function moreSheet() {
   const items = NAV.flatMap(g => g[1]).filter(([id]) => !["today", "board", "calendar"].includes(id));
@@ -2086,6 +2086,7 @@ function setSetting(k, v) {
   save();
 }
 function googleCard() {
+  if (!GCLIENT) return `<p class="small" style="margin-top:0">Coming with the next update: sign in with Google to keep a copy in your own Google Drive and use the tracker on phone and laptop.</p>`;
   if (DEMO) return `<p class="small" style="margin-top:0">In the full app you sign in with Google: your tracker is saved in <b>your own Google Drive</b> – never lost, and in sync on your phone and laptop.</p>`;
   if (!GCLIENT) return `<p class="small" style="margin-top:0">Google sync isn't set up in this version.</p>`;
   if (!cloudOn()) return `<p class="small" style="margin-top:0"><b>Never lose your data.</b> Sign in with Google and the tracker keeps a copy in <b>your own Google Drive</b> – in a private app folder only this tracker can see.</p>
