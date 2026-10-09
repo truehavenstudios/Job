@@ -852,7 +852,7 @@ const D = {
   add: (s, n) => { const d = D.pd(s); d.setDate(d.getDate() + n); return D.ds(d); },
   diff: (a, b) => Math.round((D.pd(b) - D.pd(a)) / 864e5),     // days from a to b
   dow: s => (D.pd(s).getDay() + 6) % 7,                          // Mon=0
-  ok: x => typeof x === "string" && /^\d{4}-\d\d-\d\d$/.test(x) && !isNaN(D.pd(x)),
+  ok: x => typeof x === "string" && /^\d{4}-\d\d-\d\d$/.test(x) && !isNaN(D.pd(x)) && D.ds(D.pd(x)) === x,     // must round-trip: no 2026-02-31
   weekStart: s => D.add(s, -((D.pd(s).getDay() - (S.settings.weekStart === 0 ? 0 : 1) + 7) % 7)),
   month: s => s.slice(0, 7)
 };
@@ -926,10 +926,12 @@ function migrate(s) {
       deadline: dt(a.deadline), applied: dt(a.applied), follow: dt(a.follow), followed: (Array.isArray(a.followed) ? a.followed : []).filter(D.ok).slice(-20),
       contact: str(a.contact, 80), email: str(a.email, 120), phone: str(a.phone, 40), notes: str(a.notes, 4000), cv: str(a.cv, 40), jd: str(a.jd, 20000),
       industry: str(a.industry, 60), size: str(a.size, 30), rating: clamp(Math.round(+a.rating) || 0, 0, 5), research: str(a.research, 4000), why: str(a.why, 1000),
-      history: (Array.isArray(a.history) ? a.history : []).filter(h => h && D.ok(h.d) && STATUS[h.s]).map(h => ({ d: h.d, s: h.s })).slice(-30),
+      history: (Array.isArray(a.history) ? a.history : []).filter(h => h && D.ok(h.d) && STATUS[h.s]).map(h => h.imp ? { d: h.d, s: h.s, imp: true } : { d: h.d, s: h.s }).slice(-30),
       created: dt(a.created) || today(), pinned: !!a.pinned, method: METHOD[a.method] ? a.method : "",
       jdSaved: dt(a.jdSaved)
     };
+    // moved back to the wishlist (older versions kept the applied date – it showed up in the job search log)
+    if (o.status === "wish" && o.applied && o.history.length && o.history[o.history.length - 1].s === "wish") { o.applied = ""; o.follow = ""; }
     if (a.offer && typeof a.offer === "object") {
       const f = a.offer, sc = {}; for (const k in CRIT) sc[k] = clamp(Math.round(+((f.scores || {})[k])) || 3, 1, 5);
       o.offer = { base: num(f.base), bonus: num(f.bonus), equity: num(f.equity), perks: num(f.perks), pto: num(f.pto), deadline: dt(f.deadline), start: dt(f.start), notes: str(f.notes, 2000), scores: sc };
@@ -1091,16 +1093,22 @@ matchMedia("(prefers-color-scheme: dark)").addEventListener?.("change", () => ap
 
 // ------------------------------------------------------------ modal / toast / confetti
 let modalOpen = null;
+let modalClose = null;
 function modal(title, body, foot = "", opts = {}) {
   closeModal();
   const el = document.createElement("div");
   el.className = "scrim"; el.innerHTML = `<div class="modal ${opts.cls || ""}" role="dialog" aria-modal="true" aria-label="${esc(String(title).replace(/<[^>]+>/g, ""))}" style="${opts.wide ? "max-width:" + (opts.wide === true ? 680 : opts.wide) + "px" : ""}"><div class="mh"><h2>${title}</h2><button class="iconbtn" data-act="close" aria-label="Close">${ic("x")}</button></div><div class="mb">${body}</div>${foot ? `<div class="mf">${foot}</div>` : ""}</div>`;
   el.addEventListener("click", e => { if (e.target === el) closeModal(); });
-  document.body.appendChild(el); modalOpen = el;
+  document.body.appendChild(el); modalOpen = el; modalClose = opts.onClose || null;
   const f = el.querySelector("[autofocus]"); if (f && matchMedia("(min-width:761px)").matches) setTimeout(() => { if (el.isConnected && !el.contains(document.activeElement)) { f.focus(); f.select && f.select(); } }, 50);
   return el.querySelector(".modal");
 }
-function closeModal() { if (modalOpen) { modalOpen.remove(); modalOpen = null; } }
+// safe to call twice (Esc while a field is focused fires blur/change during the removal)
+function closeModal() {
+  const m = modalOpen, cb = modalClose; modalOpen = null; modalClose = null;
+  if (m && m.isConnected) { try { m.remove(); } catch (e) { } }
+  if (m && cb) { try { cb(); } catch (e) { console.error(e); } }
+}
 addEventListener("keydown", e => { if (e.key === "Escape" && modalOpen) closeModal(); });
 let toastT = null;
 function toast(msg, act, label = "Undo") {
@@ -1143,7 +1151,11 @@ const wasApplied = a => !!a.applied || a.status !== "wish";
 const reached = (a, set) => set.includes(a.status) || a.history.some(h => set.includes(h.s)) || (set === INTV && S.interviews.some(i => i.app === a.id));
 const lastTouch = a => [a.applied, a.created, ...a.history.map(h => h.d), ...a.followed].filter(Boolean).sort().pop() || a.created;
 const appIvs = id => S.interviews.filter(i => i.app === id).sort((x, y) => (x.date + x.time).localeCompare(y.date + y.time));
-const nextIv = id => appIvs(id).find(i => i.date >= today() && i.outcome === "pending");
+// the day a closed job was closed (last move to accepted / rejected / ghosted / withdrawn)
+const closedOn = a => { const h = [...a.history].reverse().find(h => CLOSED.includes(h.s)); return h ? h.d : today(); };
+// an interview that won't happen any more: still "waiting", but the job was closed before its date
+const ivOff = i => { const a = appById(i.app); return !a || (CLOSED.includes(a.status) && i.outcome === "pending" && i.date > closedOn(a)); };
+const nextIv = id => appIvs(id).find(i => i.date >= today() && i.outcome === "pending" && !ivOff(i));
 const quietDays = a => a.status === "applied" ? daysAgo(lastTouch(a)) : 0;
 const isQuiet = a => a.status === "applied" && quietDays(a) >= S.settings.ghostDays;
 
@@ -1151,6 +1163,7 @@ const isQuiet = a => a.status === "applied" && quietDays(a) >= S.settings.ghostD
 function setStatus(a, s, d = today()) {
   if (!STATUS[s] || a.status === s) return;
   a.status = s; a.history.push({ d, s });
+  if (s === "wish") { a.applied = ""; a.follow = ""; return; }      // back on the wishlist = not applied (keeps the job search log honest)
   if (s !== "wish" && !a.applied) a.applied = d;
   if (s === "applied" && !a.follow) a.follow = D.add(d, S.settings.followDays);
   if (CLOSED.includes(s) || s === "offer") a.follow = "";
@@ -1163,17 +1176,17 @@ function todos() {
   for (const a of S.apps) {
     if (a.status === "wish" && a.deadline && D.diff(t, a.deadline) <= 3 && D.diff(t, a.deadline) >= -1)
       out.push({ k: "deadline", a, pri: 1, when: a.deadline, title: `Apply to ${a.company}`, sub: `${a.role} · deadline ${rel(a.deadline)}` });
-    if (["applied", "interview"].includes(a.status) && a.follow && a.follow <= t && !isQuiet(a))
+    if (["applied", "interview"].includes(a.status) && a.follow && a.follow <= t && !isQuiet(a) && !nextIv(a.id))
       out.push({ k: "follow", a, pri: 2, when: a.follow, title: `Follow up with ${a.company}`, sub: `${a.role} · ${a.followed.length ? "last follow-up " + rel(a.followed[a.followed.length - 1]) : "applied " + rel(a.applied || a.created)}` });
     if (isQuiet(a)) out.push({ k: "quiet", a, pri: 4, when: lastTouch(a), title: `No reply from ${a.company} in ${quietDays(a)} days`, sub: `${a.role} · send one last follow-up or mark it as ghosted` });
     if (a.status === "offer" && a.offer && a.offer.deadline && D.diff(t, a.offer.deadline) <= 5)
       out.push({ k: "offer", a, pri: 1, when: a.offer.deadline, title: `Answer the offer from ${a.company}`, sub: `${a.role} · reply ${rel(a.offer.deadline)}` });
   }
   for (const i of S.interviews) {
-    const a = appById(i.app); if (!a) continue;
+    const a = appById(i.app); if (!a || ivOff(i)) continue;
     const n = D.diff(t, i.date);
     if (i.outcome === "pending" && n >= 0 && n <= 2) out.push({ k: "iv", a, i, pri: 0, when: i.date, title: `${IKIND[i.kind]} with ${a.company}`, sub: `${rel(i.date)}${i.time ? " · " + ftime(i.time) : ""} · round ${i.round}${i.who ? " · " + i.who : ""}` });
-    if (!i.thanked && n < 0 && n >= -3) out.push({ k: "thanks", a, i, pri: 1, when: i.date, title: `Send a thank-you to ${a.company}`, sub: `after your ${IKIND[i.kind].toLowerCase()} ${rel(i.date)} – within 24 h is best` });
+    if (!i.thanked && n < 0 && n >= -3 && i.outcome !== "rejected" && !["rejected", "withdrawn", "ghosted"].includes(a.status)) out.push({ k: "thanks", a, i, pri: 1, when: i.date, title: `Send a thank-you to ${a.company}`, sub: `after your ${IKIND[i.kind].toLowerCase()} ${rel(i.date)} – within 24 h is best` });
   }
   return out.sort((x, y) => x.pri - y.pri || x.when.localeCompare(y.when));
 }
@@ -1189,12 +1202,12 @@ function weekStreak() {
 }
 function replyDays(a) {
   if (!a.applied) return null;
-  const h = a.history.find(h => RESP.includes(h.s) && h.d >= a.applied);
+  const h = a.history.find(h => RESP.includes(h.s) && h.d >= a.applied && !h.imp);      // imported rows have no real reply date
   const iv = S.interviews.filter(i => i.app === a.id).map(i => i.date).sort()[0];
   const d = [h && h.d, iv].filter(Boolean).sort()[0];
   return d ? Math.max(0, D.diff(a.applied, d)) : null;
 }
-function respDate(a) { const h = a.history.find(h => RESP.includes(h.s) && (!a.applied || h.d >= a.applied)); const iv = S.interviews.filter(i => i.app === a.id).map(i => i.date).sort()[0]; return [h && h.d, iv].filter(Boolean).sort()[0] || ""; }
+function respDate(a) { const h = a.history.find(h => RESP.includes(h.s) && !h.imp && (!a.applied || h.d >= a.applied)); const iv = S.interviews.filter(i => i.app === a.id).map(i => i.date).sort()[0]; return [h && h.d, iv].filter(Boolean).sort()[0] || ""; }
 function stats(apps = S.apps) {
   const ap = apps.filter(wasApplied);
   const resp = ap.filter(a => reached(a, RESP) || appIvs(a.id).length), iv = ap.filter(a => reached(a, INTV)), of = ap.filter(a => reached(a, OFFR));
@@ -1235,11 +1248,11 @@ function events(from, to) {
   const ev = [], inR = d => d && d >= from && d <= to;
   for (const a of S.apps) {
     if (a.status === "wish" && inR(a.deadline)) ev.push({ k: "dl", d: a.deadline, a, t: `Deadline · ${a.company}`, s: a.role });
-    if (["applied", "interview"].includes(a.status) && inR(a.follow)) ev.push({ k: "fu", d: a.follow, a, t: `Follow up · ${a.company}`, s: a.role });
+    if (["applied", "interview"].includes(a.status) && inR(a.follow) && !nextIv(a.id)) ev.push({ k: "fu", d: a.follow, a, t: `Follow up · ${a.company}`, s: a.role });
     if (a.status === "offer" && a.offer && inR(a.offer.deadline)) ev.push({ k: "od", d: a.offer.deadline, a, t: `Offer reply · ${a.company}`, s: a.role });
     if (inR(a.applied)) ev.push({ k: "ap", d: a.applied, a, t: `Applied · ${a.company}`, s: a.role });
   }
-  for (const i of S.interviews) { const a = appById(i.app); if (a && inR(i.date)) ev.push({ k: "iv", d: i.date, a, i, time: i.time, t: `${IKIND[i.kind]} · ${a.company}`, s: `Round ${i.round}${i.who ? " · " + i.who : ""}` }); }
+  for (const i of S.interviews) { const a = appById(i.app); if (a && inR(i.date) && !ivOff(i)) ev.push({ k: "iv", d: i.date, a, i, time: i.time, t: `${IKIND[i.kind]} · ${a.company}`, s: `Round ${i.round}${i.who ? " · " + i.who : ""}` }); }
   return ev.sort((x, y) => (x.d + (x.time || "99")).localeCompare(y.d + (y.time || "99")));
 }
 const EVK = { iv: "Interview", dl: "Application deadline", fu: "Follow-up", od: "Offer deadline", ap: "Applied" };
@@ -1250,12 +1263,20 @@ function evDesc(e) {
   const a = e.a, l = [a.role, a.url, e.i && e.i.where, e.i && e.i.who ? "With: " + e.i.who : "", a.contact ? "Contact: " + a.contact + (a.email ? " <" + a.email + ">" : "") : ""];
   return l.filter(Boolean).join("\n") + "\n\nFrom your Job Application Tracker";
 }
-function ics(list) {
+// fold long lines at 75 octets (UTF-8), never inside a character
+function icsFold(l) {
+  const enc = new TextEncoder(); let out = "", cur = "", n = 0, max = 75;
+  for (const ch of l) { const b = enc.encode(ch).length; if (n + b > max) { out += cur + "\r\n "; cur = ""; n = 0; max = 74; } cur += ch; n += b; }
+  return out + cur;
+}
+// cancelled: events from an earlier export that are off now (interviews of a closed job) – same UID, STATUS:CANCELLED removes them
+function ics(list, cancelled = []) {
   const stamp = new Date(now()).toISOString().replace(/[-:]/g, "").replace(/\.\d+Z/, "Z");
+  const seq = Math.max(0, Math.floor(now() / 60000) - 28928160);      // grows with every export, so calendars take the newer version
   const L = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//TrueHaven Studios//Job Tracker//EN", "CALSCALE:GREGORIAN", "METHOD:PUBLISH", "X-WR-CALNAME:Job search"];
   for (const e of list) {
-    const id = `${e.k}-${e.i ? e.i.id : e.a.id}-${icsD(e.d)}@truehaven-jobs`;
-    L.push("BEGIN:VEVENT", "UID:" + id, "DTSTAMP:" + stamp, "SUMMARY:" + icsEsc(e.t));
+    const id = `${e.k}-${e.i ? e.i.id : e.a.id}@truehaven-jobs`;      // one stable id per item: a moved date replaces the old event
+    L.push("BEGIN:VEVENT", "UID:" + id, "SEQUENCE:" + seq, "DTSTAMP:" + stamp, "LAST-MODIFIED:" + stamp, "SUMMARY:" + icsEsc(e.t));
     if (e.time) { const [d2, t2] = addMin(e.d, e.time, e.i ? e.i.dur : 60); L.push("DTSTART:" + icsT(e.d, e.time), "DTEND:" + icsT(d2, t2)); }
     else L.push("DTSTART;VALUE=DATE:" + icsD(e.d), "DTEND;VALUE=DATE:" + icsD(D.add(e.d, 1)));
     if (e.i && e.i.where) L.push("LOCATION:" + icsEsc(e.i.where));
@@ -1264,8 +1285,14 @@ function ics(list) {
     for (const tr of al) L.push("BEGIN:VALARM", "ACTION:DISPLAY", "DESCRIPTION:" + icsEsc(e.t), "TRIGGER:" + tr, "END:VALARM");
     L.push("END:VEVENT");
   }
+  for (const e of cancelled) {
+    L.push("BEGIN:VEVENT", `UID:${e.k}-${e.i ? e.i.id : e.a.id}@truehaven-jobs`, "SEQUENCE:" + seq, "DTSTAMP:" + stamp, "LAST-MODIFIED:" + stamp, "STATUS:CANCELLED", "SUMMARY:" + icsEsc("Cancelled: " + e.t));
+    if (e.time) { const [d2, t2] = addMin(e.d, e.time, e.i ? e.i.dur : 60); L.push("DTSTART:" + icsT(e.d, e.time), "DTEND:" + icsT(d2, t2)); }
+    else L.push("DTSTART;VALUE=DATE:" + icsD(e.d), "DTEND;VALUE=DATE:" + icsD(D.add(e.d, 1)));
+    L.push("END:VEVENT");
+  }
   L.push("END:VCALENDAR");
-  return L.map(l => { let o = "", s = l; while (s.length > 74) { o += s.slice(0, 74) + "\r\n "; s = s.slice(74); } return o + s; }).join("\r\n");
+  return L.map(icsFold).join("\r\n");
 }
 function gcalLink(e) {
   const p = new URLSearchParams({ action: "TEMPLATE", text: e.t, details: evDesc(e) });
@@ -1289,16 +1316,42 @@ function parseCSV(text) {
   if (cell || row.length) { row.push(cell); rows.push(row); }
   return rows.filter(r => r.some(c => c.trim()));
 }
-const COLS = { company: /company|employer|organi[sz]ation|firm/, role: /job ?title|position|role|title|job$/, status: /status|stage/, applied: /date ?applied|applied|application date|date sent/, deadline: /deadline|closing|due/,
-  url: /link|url|posting|website/, location: /location|city|place/, work: /on-?site|remote|work ?type|arrangement/, type: /job ?type|employment|contract type/, salMin: /salary|pay|compensation|wage/, source: /source|found|platform|via|board/,
-  contact: /contact ?name|recruiter|hiring manager|contact$/, email: /e-?mail/, phone: /phone|number/, notes: /notes?|comments?|remarks/, interest: /interest|priority|excitement/, follow: /follow-?up ?date|follow ?up$/ };
+const COLS = { company: /company|employer|organi[sz]ation|firm/, follow: /follow[- ]?up/, cv: /resume|résumé|\bcv\b|cover letter version/, role: /job ?title|position|role|title|job$/, status: /status|stage/, applied: /date ?applied|applied|application date|date sent/, deadline: /deadline|closing|due/,
+  url: /link|url|posting|website/, location: /location|city|place/, work: /on-?site|remote|work ?type|arrangement/, type: /job ?type|employment|contract type/, cur: /currency|^cur$/,
+  salMax: /(salary|pay|compensation|wage).*\b(max|maximum|to|upper|high|highest)\b|\b(max|maximum|upper|highest)\b.*(salary|pay|compensation|wage)/, salMin: /salary|pay|compensation|wage/, source: /source|found|platform|via|board/,
+  contact: /contact ?name|recruiter|hiring manager|contact$/, email: /e-?mail/, phone: /phone|number/, notes: /notes?|comments?|remarks/, interest: /interest|priority|excitement/ };
 function mapHeader(h) { const x = h.toLowerCase().trim(); for (const k in COLS) if (COLS[k].test(x)) return k; return null; }
-function parseDate(v) {
+// dates from spreadsheets: 2026-10-05, 10/5/2026, 5.10.2026, Oct 5, 5 October 2026, Excel day numbers …
+// without a year: past = the most recent such day up to today (for "date applied"), otherwise the one closest to today
+const MONRX = /^(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)/;
+function ymd(y, mo, d) { const s = `${y}-${String(mo).padStart(2, "0")}-${String(d).padStart(2, "0")}`; return y >= 1990 && y <= 2100 && D.ok(s) ? s : ""; }
+function noYear(mo, d, past) {
+  const y = +today().slice(0, 4), c = [y - 1, y, y + 1].map(x => ymd(x, mo, d)).filter(Boolean);
+  if (!c.length) return "";
+  if (past) return c.filter(x => x <= today()).pop() || "";
+  return c.sort((a, b) => Math.abs(D.diff(today(), a)) - Math.abs(D.diff(today(), b)))[0];
+}
+function parseDate(v, past) {
   v = String(v || "").trim(); if (!v) return "";
-  if (/^\d{4}-\d\d-\d\d/.test(v)) return v.slice(0, 10);
-  let m = v.match(/^(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})$/);
-  if (m) { let [, a, b, y] = m.map(Number); if (y < 100) y += 2000; const us = a <= 12 && b > 12 ? true : a > 12 ? false : !/[.]/.test(v); const mo = us ? a : b, d = us ? b : a; if (mo >= 1 && mo <= 12 && d >= 1 && d <= 31) return `${y}-${String(mo).padStart(2, "0")}-${String(d).padStart(2, "0")}`; }
-  const d = new Date(v); return isNaN(d) ? "" : D.ds(d);
+  let m = v.match(/^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})(?:[T ].*)?$/);
+  if (m) return ymd(+m[1], +m[2], +m[3]);
+  m = v.match(/^(\d{1,2})[./-](\d{1,2})(?:[./-](\d{2,4}))?\.?$/);
+  if (m) {
+    let [, a, b, y] = m.map(Number); const us = a <= 12 && b > 12 ? true : a > 12 ? false : !/[.]/.test(v); const mo = us ? a : b, d = us ? b : a;
+    if (!m[3]) return noYear(mo, d, past);
+    if (y < 100) y += 2000; return ymd(y, mo, d);
+  }
+  if (/^\d{5}(\.\d+)?$/.test(v)) { const n = Math.floor(+v); if (n > 30000 && n < 80000) { const x = new Date(1899, 11, 30); x.setDate(x.getDate() + n); return D.ds(x); } return ""; }
+  // month names: "Oct 5", "October 5th, 2026", "5 Oct 2026", "Nov. 30, 2026"
+  const w = v.toLowerCase().replace(/(\d)(st|nd|rd|th)\b/g, "$1").replace(/[.,]/g, " ").split(/\s+/).filter(Boolean);
+  const mi = w.findIndex(x => MONRX.test(x));
+  if (mi >= 0) {
+    const mo = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"].indexOf(w[mi].slice(0, 3)) + 1, nums = w.filter((x, i) => i !== mi && /^\d+$/.test(x)).map(Number);
+    const y = nums.find(n => n > 31), d = nums.find(n => n >= 1 && n <= 31);
+    if (!d) return "";
+    return y ? ymd(y, mo, d) : noYear(mo, d, past);
+  }
+  return "";
 }
 function parseStatus(v) {
   const x = String(v || "").toLowerCase();
@@ -1306,23 +1359,32 @@ function parseStatus(v) {
   if (/reject|declin|denied|no$|unsuccess/.test(x)) return "rejected"; if (/ghost|no (reply|response)/.test(x)) return "ghosted"; if (/withdr|archiv/.test(x)) return "withdrawn";
   if (/appl|submit|sent|review|ack/.test(x)) return "applied"; return "wish";
 }
-function parseMoney(v) { const s = String(v || "").replace(/[, ]/g, ""); const n = s.match(/(\d+(?:\.\d+)?)(k)?/gi) || []; return n.map(x => /k/i.test(x) ? parseFloat(x) * 1000 : parseFloat(x)).filter(x => x > 0); }
+// "$70,000 - $80,000", "70-80k" (= 70K–80K), "€55.000", "60k–75k"
+function parseMoney(v) {
+  const s = String(v || "").replace(/(\d)[.'’](?=\d{3}(\D|$))/g, "$1").replace(/[, ]/g, "");
+  const n = (s.match(/(\d+(?:\.\d+)?)(k)?/gi) || []).map(x => ({ v: parseFloat(x), k: /k/i.test(x) }));
+  const anyK = n.some(x => x.k);
+  return n.map(x => x.k || (anyK && x.v < 1000) ? x.v * 1000 : x.v).filter(x => x > 0);
+}
+const dupKey = a => [a.company, a.role, a.applied].map(x => String(x || "").trim().toLowerCase()).join("|");
 function importRows(rows) {
-  const head = rows[0].map(mapHeader), out = [];
+  const head = rows[0].map(mapHeader), out = [], seen = new Set(S.apps.map(dupKey)); let dups = 0;
   if (!head.includes("company") && !head.includes("role")) return { apps: [], head, err: "No “Company” or “Job title” column found." };
   for (const r of rows.slice(1)) {
     const o = {}; head.forEach((k, i) => { if (k && r[i] != null && r[i] !== "" && o[k] == null) o[k] = r[i].trim(); });
     if (!o.company && !o.role) continue;
-    const pay = parseMoney(o.salMin), wk = String(o.work || "").toLowerCase(), ty = String(o.type || "").toLowerCase();
-    const a = { id: uid(), company: o.company || "", role: o.role || "", status: parseStatus(o.status || (o.applied ? "applied" : "")), applied: parseDate(o.applied), deadline: parseDate(o.deadline), follow: parseDate(o.follow),
+    const pay = parseMoney(o.salMin), payMax = parseMoney(o.salMax), wk = String(o.work || "").toLowerCase(), ty = String(o.type || "").toLowerCase();
+    const a = { id: uid(), company: o.company || "", role: o.role || "", status: parseStatus(o.status || (o.applied ? "applied" : "")), applied: parseDate(o.applied, true), deadline: parseDate(o.deadline), follow: parseDate(o.follow),
       url: o.url || "", location: o.location || "", work: /remote/.test(wk) ? "remote" : /hybrid/.test(wk) ? "hybrid" : /site|office/.test(wk) ? "onsite" : "",
       type: /part/.test(ty) ? "part" : /contract/.test(ty) ? "contract" : /intern/.test(ty) ? "intern" : /freelanc/.test(ty) ? "freelance" : /full/.test(ty) ? "full" : "",
-      salMin: pay[0] || 0, salMax: pay[1] || pay[0] || 0, source: SOURCES.find(s => s.toLowerCase() === String(o.source || "").toLowerCase()) || o.source || "", contact: o.contact || "", email: o.email || "", phone: o.phone || "",
+      salMin: pay[0] || payMax[0] || 0, salMax: payMax[0] || pay[1] || pay[0] || 0, cur: /^[a-z]{3}$/i.test(o.cur || "") ? o.cur.toUpperCase() : "", cv: o.cv || "", source: SOURCES.find(s => s.toLowerCase() === String(o.source || "").toLowerCase()) || o.source || "", contact: o.contact || "", email: o.email || "", phone: o.phone || "",
       notes: o.notes || "", interest: /high|3/.test(String(o.interest).toLowerCase()) ? 3 : /low|1/.test(String(o.interest).toLowerCase()) ? 1 : 2, created: today() };
-    a.history = a.status !== "wish" ? [{ d: a.applied || today(), s: a.status }] : [];
+    if (a.salMin > a.salMax) [a.salMin, a.salMax] = [a.salMax, a.salMin];
+    a.history = a.status !== "wish" ? [{ d: a.applied || today(), s: a.status, imp: true }] : [];      // imported: not a real reply date
+    const k = dupKey(a); if (seen.has(k)) { dups++; continue; } seen.add(k);
     out.push(a);
   }
-  return { apps: out, head };
+  return { apps: out, head, dups };
 }
 const csvCell = v => { const s = String(v ?? ""); return /[",\n;]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
 function exportCSV() {
@@ -1527,7 +1589,7 @@ function ringChart(parts, center, sub) {
 function heatmap(weeks) {
   const t = today(), ws = S.settings.weekStart, start = D.add(D.weekStart(t), -7 * (weeks - 1)), cnt = {};
   S.apps.forEach(a => { if (a.applied) cnt[a.applied] = (cnt[a.applied] || 0) + 1; });
-  S.interviews.forEach(i => { if (i.date <= t) cnt[i.date] = (cnt[i.date] || 0) + 1; });
+  S.interviews.forEach(i => { if (i.date <= t && !ivOff(i)) cnt[i.date] = (cnt[i.date] || 0) + 1; });
   S.apps.forEach(a => a.followed.forEach(d => cnt[d] = (cnt[d] || 0) + 1));
   const lvl = n => n >= 4 ? 4 : n;
   let cols = "", mon = "", active = 0;
@@ -1603,7 +1665,7 @@ function vToday() {
   const lim = matchMedia("(max-width:760px)").matches ? 5 : 8;
   const todo = card("To do", T.length ? `<div class="todos">${T.slice(0, VS.allTodo ? 99 : lim).map(todoRow).join("")}</div>${T.length > lim && !VS.allTodo ? `<button class="link mt" data-act="allTodo">Show all ${T.length}</button>` : ""}`
     : `<div class="empty">${S.apps.length ? "Nothing needs you today." : "Add the first job you want to apply to – the tracker tells you what to do next."}${S.apps.length ? "" : `<div class="mt"><button class="btn pri" data-act="addApp">${ic("plus")}Add a job</button></div>`}</div>`, { right: T.length ? `<span class="muted small">${T.length}</span>` : "" });
-  const nxt = S.interviews.filter(i => i.outcome === "pending" && (i.date > t || (i.date === t && (!i.time || i.time >= new Date(now()).toTimeString().slice(0, 5))))).sort((x, y) => (x.date + x.time).localeCompare(y.date + y.time))[0];
+  const nxt = S.interviews.filter(i => i.outcome === "pending" && !ivOff(i) && (i.date > t || (i.date === t && (!i.time || i.time >= new Date(now()).toTimeString().slice(0, 5))))).sort((x, y) => (x.date + x.time).localeCompare(y.date + y.time))[0];
   const w8 = Array.from({ length: 8 }, (_, i) => D.add(ws, -7 * (7 - i)));
   const week = card("This week", `<div class="wk"><b>${wk}</b><span>${g ? `of ${g} applications` : plural(wk, "application")}</span></div>${g ? bar(wk / g, "", "var(--c1)") : ""}<p class="small muted" style="margin:10px 0 4px">${g ? (wk >= g ? "Weekly goal reached." : `${g - wk} more to reach your goal.`) : "Set a weekly goal in Settings."}</p>
     ${colChart([{ name: "Applied", color: CC[0], vals: w8.map(weekApplied) }], w8.map((w, i) => i === 7 ? "this wk" : dshort(w)), { h: 130, w: 420, every: 7, ref: g || 0, tipLabel: i => "Week of " + dshort(w8[i]), label: "Applications in the last 8 weeks" })}`);
@@ -1716,12 +1778,12 @@ const prepDone = i => PREP.filter(([k]) => i.prep[k]).length;
 const ASK = ["What does success look like in the first 90 days?", "What's the biggest challenge for the team right now?", "How do you measure performance in this role?", "What do you enjoy most about working here?", "What are the next steps – and when can I expect to hear back?"];
 
 function vInterviews() {
-  const t = today(), up = S.interviews.filter(i => i.outcome === "pending" && i.date >= t).sort((x, y) => (x.date + x.time).localeCompare(y.date + y.time));
-  const past = S.interviews.filter(i => !(i.outcome === "pending" && i.date >= t)).sort((x, y) => (y.date + y.time).localeCompare(x.date + x.time));
+  const t = today(), up = S.interviews.filter(i => i.outcome === "pending" && i.date >= t && !ivOff(i)).sort((x, y) => (x.date + x.time).localeCompare(y.date + y.time));
+  const past = S.interviews.filter(i => !up.includes(i)).sort((x, y) => (y.date + y.time).localeCompare(x.date + x.time));
   const row = i => { const a = appById(i.app), n = D.diff(t, i.date), notes = [i.asked, i.said].filter(Boolean).join(" ").slice(0, 120);
     return `<div class="item click" data-act="ivNotes" data-iv="${i.id}">${dateBox(i.date)}<div class="grow"><div class="nm">${esc(a.company)} <span class="muted small">· ${IKIND[i.kind]}, round ${i.round}</span></div>
-      <div class="small muted ell">${i.outcome === "pending" && n >= 0 ? `${n === 0 ? "Today" : n === 1 ? "Tomorrow" : "In " + n + " days"}${i.time ? ", " + ftime(i.time) : ""}${i.who ? " · " + esc(i.who) : ""}` : notes ? esc(notes) : "No notes yet"}</div></div>
-      <span class="tiny ${i.outcome === "passed" ? "okc" : i.outcome === "rejected" ? "badc" : "muted"}">${i.outcome === "pending" ? (i.date >= t ? `Prep ${prepDone(i)}/${PREP.length}` : "Waiting") : i.outcome === "passed" ? "Next round" : "Not this time"}</span></div>`; };
+      <div class="small muted ell">${i.outcome === "pending" && n >= 0 && !ivOff(i) ? `${n === 0 ? "Today" : n === 1 ? "Tomorrow" : "In " + n + " days"}${i.time ? ", " + ftime(i.time) : ""}${i.who ? " · " + esc(i.who) : ""}` : notes ? esc(notes) : "No notes yet"}</div></div>
+      <span class="tiny ${i.outcome === "passed" ? "okc" : i.outcome === "rejected" ? "badc" : "muted"}">${ivOff(i) ? `Job ${STATUS[a.status].n.toLowerCase()}` : i.outcome === "pending" ? (i.date >= t ? `Prep ${prepDone(i)}/${PREP.length}` : "Waiting") : i.outcome === "passed" ? "Next round" : "Not this time"}</span></div>`; };
   return topbar("Interviews", "", `<button class="btn pri" data-act="ivEdit">${ic("plus")}Add an interview</button>`) +
     `<div class="grid g2 start">${card(`Upcoming`, up.length ? `<div class="list">${up.map(row).join("")}</div>` : `<div class="empty">No interviews scheduled.</div>`, { right: up.length ? `<span class="muted small">${up.length}</span>` : "" })}
     ${card("Past – your notes", past.length ? `<div class="list">${past.map(row).join("")}</div><p class="tiny faint mt">What they asked and how you answered – read it before the next round.</p>` : `<div class="empty">After an interview, write down what they asked. It helps a lot in the next round.</div>`)}</div>`;
@@ -1730,16 +1792,20 @@ function vInterviews() {
 // ------------------------------------------------------------ offers: side by side
 const totalComp = o => (o.base || 0) + (o.bonus || 0) + (o.equity || 0) + (o.perks || 0);
 function vOffers() {
-  const L = S.apps.filter(a => a.offer && ["offer", "accepted"].includes(a.status)).sort((x, y) => totalComp(y.offer) - totalComp(x.offer)), tgt = S.settings.targetPay;
+  const c = a => curOf(a), home = S.settings.currency || "USD";
+  // offers in different currencies are never compared by their raw numbers: grouped by currency (yours first), ranked within each
+  const L = S.apps.filter(a => a.offer && ["offer", "accepted"].includes(a.status)).sort((x, y) => (c(x) === home ? "" : c(x)).localeCompare(c(y) === home ? "" : c(y)) || totalComp(y.offer) - totalComp(x.offer));
+  const tgt0 = S.settings.targetPay, tgtFor = a => c(a) === home ? tgt0 : 0;      // your target is in your own currency
   if (!L.length) return topbar("Offers") + `<div class="empty">No offers yet. When a job reaches “Offer”, add the details and compare them here side by side.</div>`;
-  const best = totalComp(L[0].offer), c = a => curOf(a);
+  const curs = [...new Set(L.map(c))], mixed = curs.length > 1, same = a => L.filter(x => c(x) === c(a));
+  const best = a => Math.max(...same(a).map(x => totalComp(x.offer))), tgt = tgt0;
   const rows = [["Base salary", a => money(a.offer.base, c(a))], ["Bonus", a => a.offer.bonus ? money(a.offer.bonus, c(a)) : "–"], ["Equity per year", a => a.offer.equity ? money(a.offer.equity, c(a)) : "–"], ["Benefits value", a => a.offer.perks ? money(a.offer.perks, c(a)) : "–"],
-    ["Total per year", a => `<b>${money(totalComp(a.offer), c(a))}</b>${L.length > 1 && totalComp(a.offer) === best ? ` <span class="tag">highest</span>` : ""}${tgt ? `<div class="tiny ${totalComp(a.offer) >= tgt ? "okc" : "badc"}">${totalComp(a.offer) >= tgt ? "+" : "−"}${money(Math.abs(totalComp(a.offer) - tgt), c(a))} vs your target</div>` : ""}`, "tot"],
+    ["Total per year", a => `<b>${money(totalComp(a.offer), c(a))}</b>${same(a).length > 1 && totalComp(a.offer) === best(a) ? ` <span class="tag">highest${mixed ? " in " + c(a) : ""}</span>` : ""}${tgtFor(a) ? `<div class="tiny ${totalComp(a.offer) >= tgt ? "okc" : "badc"}">${totalComp(a.offer) >= tgt ? "+" : "−"}${money(Math.abs(totalComp(a.offer) - tgt), c(a))} vs your target</div>` : tgt && mixed ? `<div class="tiny muted">in ${esc(c(a))} – not compared with your ${esc(home)} target</div>` : ""}`, "tot"],
     ["Paid days off", a => a.offer.pto ? a.offer.pto + " days" : "–"], ["Work type", a => WORK[a.work] || "–"], ["Location", a => esc(a.location || "–")], ["Start date", a => a.offer.start ? dshort(a.offer.start) : "–"],
     ["Reply by", a => a.status === "accepted" ? "Accepted" : a.offer.deadline ? `${dshort(a.offer.deadline)} <span class="tiny muted">(${rel(a.offer.deadline)})</span>` : "–"], ["Notes", a => `<span class="small">${esc(a.offer.notes || "–")}</span>`]];
-  const maxT = Math.max(...L.map(a => totalComp(a.offer)), tgt || 0), comp = [["Base", "base", CC[0]], ["Bonus", "bonus", CC[1]], ["Equity", "equity", CC[2]], ["Benefits", "perks", CC[3]]];
-  const chart = card("Total pay per year", `<div class="oc">${L.map(a => `<div class="ocr"><span class="hbn"><b>${esc(a.company)}</b></span><div class="oct"><div style="width:${totalComp(a.offer) / maxT * 100}%">${stackBar(comp.map(([n, k, col]) => ({ n, v: a.offer[k] || 0, c: col, d: money(a.offer[k] || 0, c(a)) })), true)}</div>${tgt ? `<u style="left:${tgt / maxT * 100}%" data-tip="Your target: ${esc(money(tgt, c(a)))}"></u>` : ""}</div><span class="hbv">${money(totalComp(a.offer), c(a), true)}</span></div>`).join("")}</div>
-    ${legend(comp.map(([n, , col]) => [col, n]))}${tgt ? `<p class="tiny faint">The thin line is your target salary (${money(tgt)}).</p>` : ""}`);
+  const maxT = a => Math.max(...same(a).map(x => totalComp(x.offer)), tgtFor(a) || 0) || 1, comp = [["Base", "base", CC[0]], ["Bonus", "bonus", CC[1]], ["Equity", "equity", CC[2]], ["Benefits", "perks", CC[3]]];
+  const chart = card("Total pay per year", `<div class="oc">${L.map(a => `<div class="ocr"><span class="hbn"><b>${esc(a.company)}</b></span><div class="oct"><div style="width:${totalComp(a.offer) / maxT(a) * 100}%">${stackBar(comp.map(([n, k, col]) => ({ n, v: a.offer[k] || 0, c: col, d: money(a.offer[k] || 0, c(a)) })), true)}</div>${tgtFor(a) ? `<u style="left:${tgt / maxT(a) * 100}%" data-tip="Your target: ${esc(money(tgt, c(a)))}"></u>` : ""}</div><span class="hbv">${money(totalComp(a.offer), c(a), true)}</span></div>`).join("")}</div>
+    ${legend(comp.map(([n, , col]) => [col, n]))}${tgt ? `<p class="tiny faint">The thin line is your target salary (${money(tgt)}).</p>` : ""}${mixed ? `<p class="tiny faint">Your offers are in different currencies (${curs.map(esc).join(", ")}). Bars and “highest” compare offers in the same currency only – convert them to compare across currencies.</p>` : ""}`);
   return topbar("Offers", plural(L.length, "offer")) + chart + `<div class="card mt"><div class="scrollx"><table class="t cmp"><thead><tr><th></th>${L.map(a => `<th><div class="nm">${esc(a.company)}</div><div class="tiny muted">${esc(a.role)}</div></th>`).join("")}</tr></thead>
     <tbody>${rows.map(([n, f, cls]) => `<tr class="${cls || ""}"><td>${n}</td>${L.map(a => `<td>${f(a)}</td>`).join("")}</tr>`).join("")}<tr><td></td>${L.map(a => `<td><button class="btn sm" data-act="offerEdit" data-id="${a.id}">Edit</button></td>`).join("")}</tr></tbody></table></div></div>
     <p class="tiny faint mt">Compare the total, not just the base salary. Benefits value = retirement match, insurance, stipends – roughly per year. ${tgt ? "" : "Add your target salary in Settings to see the difference."}</p>`;
@@ -1774,7 +1840,7 @@ function appModal(id, pre = {}) {
 function appSave(id) {
   const co = val("fCo"), ro = val("fRo");
   if (!co && !ro) { toast("Add the company or the job title."); $("#fCo").focus(); return; }
-  let a = id ? appById(id) : null; const isNew = !a, oldDl = a ? a.deadline : "";
+  let a = id ? appById(id) : null; const isNew = !a, oldDl = a ? a.deadline : "", oldAp = a ? a.applied || "" : "";
   const pasted = $("#fPaste") ? $("#fPaste").value.trim() : "";
   commit(() => {
     if (!a) { a = { id: uid(), status: "wish", history: [], followed: [], created: today(), interest: 2 }; S.apps.unshift(a); }
@@ -1782,7 +1848,11 @@ function appSave(id) {
     if ($("#fLoc")) Object.assign(a, { location: val("fLoc"), work: val("fWork"), type: val("fType"), source: val("fSrc") || sourceFromUrl(a.url), salMin: num(val("fSa1").replace(/[^\d.]/g, "")), salMax: num(val("fSa2").replace(/[^\d.]/g, "")),
       cur: (val("fCur") || S.settings.currency).toUpperCase().slice(0, 3), deadline: val("fDl"), interest: FORM.interest || 2, contact: val("fCn"), email: val("fEm"), phone: val("fPh"), method: val("fMeth") });
     if (pasted.length >= 30) { a.jd = pasted.slice(0, 20000); a.jdSaved = today(); }
-    if (val("fAp")) a.applied = val("fAp");
+    if ($("#fAp")) {      // the field can be cleared; a new date on a wishlist job means you applied
+      const ap = D.ok(val("fAp")) ? val("fAp") : "";
+      if (ap && ap !== oldAp && FORM.status === "wish" && a.status === "wish") FORM.status = "applied";
+      a.applied = ap;
+    }
     if (a.salMin && !a.salMax) a.salMax = a.salMin;
     if (FORM.status !== a.status) setStatus(a, FORM.status, a.applied && FORM.status === "applied" ? a.applied : today());
     if (a.status === "applied" && !a.follow) a.follow = D.add(a.applied || today(), S.settings.followDays);
@@ -1806,11 +1876,17 @@ function drawDetail() {
     <div class="field" style="margin:14px 0 0"><select class="inp" id="dSt" aria-label="Status">${Object.keys(STATUS).map(k => opt(k, STATUS[k].n, a.status)).join("")}</select></div>
     <div class="dtabs">${tabs.map(([k, t]) => `<button class="${DT.tab === k ? "on" : ""}" data-act="dTab" data-v="${k}">${t}</button>`).join("")}</div>`;
   const body = head + `<div class="dbody">${({ overview: dOverview, ad: dAd, interviews: dIvs, offer: dOffer, emails: dEmails })[DT.tab](a)}</div>`;
-  const m = modal("Job", body, `<button class="btn" data-act="appEdit" data-id="${a.id}">Edit details</button><button class="btn pri" data-act="close">Done</button>`, { wide: 720, cls: "detail" });
+  modalClose = null;      // just redrawing the sheet – no need to redraw the page behind it
+  const m = modal("Job", body, `<button class="btn" data-act="appEdit" data-id="${a.id}">Edit details</button><button class="btn pri" data-act="close">Done</button>`, { wide: 720, cls: "detail", onClose: () => render() });
   const mb = m.querySelector(".mb"); if (mb) mb.scrollTop = y;
   $("#dSt").addEventListener("change", e => markStatus(a.id, e.target.value));
   const jd = $("#dJd"); if (jd) jd.addEventListener("input", () => { clearTimeout(jd.t); jd.t = setTimeout(() => { a.jd = jd.value.slice(0, 20000); if (!a.jdSaved) a.jdSaved = today(); save(); }, 400); });
-  $$("[data-af]").forEach(el => el.addEventListener("change", () => { commit(() => { a[el.dataset.af] = el.value; }, "edit " + el.dataset.af); drawDetail(); }));
+  // notes are saved while you type (Esc or X right after typing keeps them, no redraw needed); a new follow-up date redraws the sheet
+  $$("[data-af]").forEach(el => {
+    const k = el.dataset.af;
+    if (el.tagName === "TEXTAREA") el.addEventListener("input", () => { const x = appById(DT.id); if (!x) return; if (!el.snapped) { snap("edit " + k); el.snapped = true; } x[k] = el.value.slice(0, 4000); save(); });
+    else el.addEventListener("change", () => { const x = appById(DT.id); if (!x) return; commit(() => { x[k] = D.ok(el.value) ? el.value : ""; }, "edit " + k); if (modalOpen && $(".modal.detail")) drawDetail(); });
+  });
 }
 function dOverview(a) {
   const f = (k, v) => v ? `<dt>${k}</dt><dd>${v}</dd>` : "";
@@ -1830,7 +1906,7 @@ function dAd(a) {
 }
 function dIvs(a) {
   const ivs = appIvs(a.id);
-  return `${ivs.length ? `<div class="list">${ivs.map(i => `<div class="item click" data-act="ivNotes" data-iv="${i.id}">${dateBox(i.date)}<div class="grow"><div class="nm">${IKIND[i.kind]} · round ${i.round}</div><div class="small muted ell">${i.time ? ftime(i.time) + " · " : ""}${esc(i.who || "")}${i.asked ? " · notes saved" : ""}</div></div><span class="tiny ${i.outcome === "passed" ? "okc" : i.outcome === "rejected" ? "badc" : "muted"}">${i.outcome === "passed" ? "Next round" : i.outcome === "rejected" ? "Not this time" : i.date >= today() ? "Upcoming" : "Waiting"}</span></div>`).join("")}</div>` : `<div class="empty">No interviews yet.</div>`}
+  return `${ivs.length ? `<div class="list">${ivs.map(i => `<div class="item click" data-act="ivNotes" data-iv="${i.id}">${dateBox(i.date)}<div class="grow"><div class="nm">${IKIND[i.kind]} · round ${i.round}</div><div class="small muted ell">${i.time ? ftime(i.time) + " · " : ""}${esc(i.who || "")}${i.asked ? " · notes saved" : ""}</div></div><span class="tiny ${i.outcome === "passed" ? "okc" : i.outcome === "rejected" ? "badc" : "muted"}">${i.outcome === "passed" ? "Next round" : i.outcome === "rejected" ? "Not this time" : ivOff(i) ? "Cancelled" : i.date >= today() ? "Upcoming" : "Waiting"}</span></div>`).join("")}</div>` : `<div class="empty">No interviews yet.</div>`}
     <div class="row mt"><button class="btn pri" data-act="ivEdit" data-app="${a.id}">Add interview</button></div>`;
 }
 function dOffer(a) {
@@ -1848,12 +1924,15 @@ let MAIL = null;
 function mailModal(id, kind, ivId) {
   const a = appById(id), iv = ivId ? ivById(ivId) : appIvs(id).filter(i => i.date <= today()).pop();
   const m = email(kind, a, iv); MAIL = { id, kind, iv: iv ? iv.id : "" };
+  MAIL.sent = false;
   modal(EMAILS[kind], `${fld("To", `<input class="inp" id="mTo" type="email" value="${esc(a.email)}" placeholder="name@company.com">`)}${fld("Subject", `<input class="inp" id="mSu" value="${esc(m.subject)}">`)}${fld("Message", `<textarea class="inp" id="mBo" rows="12">${esc(m.body)}</textarea>`, "Replace everything in [brackets] and add a personal line.")}`,
     `<button class="btn" data-act="mailCopy">Copy text</button><button class="btn pri" data-act="mailOpen">Open in mail app</button>`, { wide: 620 });
 }
+// counted once per email (Copy text and Open in mail app are the same email) and at most once a day
 function mailSent() {
+  if (!MAIL || MAIL.sent) return; MAIL.sent = true;
   const a = appById(MAIL.id); if (!a) return;
-  if (MAIL.kind === "follow") commit(() => { a.followed.push(today()); a.follow = D.add(today(), S.settings.followDays); }, "follow-up");
+  if (MAIL.kind === "follow") commit(() => { if (a.followed[a.followed.length - 1] !== today()) a.followed.push(today()); a.follow = D.add(today(), S.settings.followDays); }, "follow-up");
   if (MAIL.kind === "thanks" && MAIL.iv) commit(() => { const i = ivById(MAIL.iv); if (i) i.thanked = true; }, "thank-you");
 }
 
@@ -1879,12 +1958,13 @@ function ivSave(ivId) {
   }, isNew ? "add interview" : "edit interview");
   i = S.interviews.find(x => x.id === i.id); closeModal();
   if (isNew) toast("Interview saved.", () => ivCalOpen(i.id), "Add to calendar");
-  else if (i.cal && before !== i.date + i.time) toast("Time changed – your phone's calendar still has the old one.", () => ivCalOpen(i.id), "Update calendar");
+  else if (i.cal && before !== i.date + i.time) toast("Time changed – add it to your calendar again to move it there too.", () => ivCalOpen(i.id), "Update calendar");
   else ivNotes(i.id);
 }
 function ivNotes(ivId) {
-  const i = ivById(ivId), a = appById(i.app), up = i.outcome === "pending" && i.date >= today();
+  const i = ivById(ivId), a = appById(i.app), up = i.outcome === "pending" && i.date >= today() && !ivOff(i);
   const ta = (k, label, ph, rows = 3) => fld(label, `<textarea class="inp" data-iv="${i.id}" data-ivf="${k}" rows="${rows}" placeholder="${esc(ph)}">${esc(i[k])}</textarea>`);
+  modalClose = null;
   modal(`${esc(a.company)} · ${IKIND[i.kind]}`, `<div class="small muted mb16">Round ${i.round} · ${dlong(i.date)}${i.time ? ", " + ftime(i.time) : ""}${i.who ? " · " + esc(i.who) : ""}${i.where ? ` · ${/^https?:/.test(i.where) ? `<a class="link" href="${esc(i.where)}" target="_blank" rel="noopener">Join link</a>` : esc(i.where)}` : ""}</div>
     ${up ? `<div class="sec">Before</div><div class="checks">${PREP.map(([k, n]) => `<button class="chk ${i.prep[k] ? "on" : ""}" data-act="prepT" data-iv="${i.id}" data-k="${k}"><span>${ic("check")}</span>${n}</button>`).join("")}</div>
       ${ta("qs", "Questions to ask them", "", 3)}<button class="link tiny" data-act="qsFill" data-iv="${i.id}">Add a few good questions</button>${a.jd ? ` · <button class="link tiny" data-act="open" data-id="${a.id}" data-tab="ad">Read the saved job ad</button>` : ""}` : ""}
@@ -1892,7 +1972,7 @@ function ivNotes(ivId) {
     ${ta("asked", "What they asked", "Their questions – write them down right after, while you still remember", 4)}${ta("said", "How you answered / what went well", "", 3)}${ta("next", "Next steps they mentioned", "e.g. decision by Friday, second round with the team", 2)}
     ${up ? "" : fld("Outcome", `<div class="seg" id="iOut">${[["pending", "Waiting"], ["passed", "Next round / offer"], ["rejected", "Not this time"]].map(([k, n]) => `<button type="button" class="${i.outcome === k ? "on" : ""}" data-act="iOut" data-iv="${i.id}" data-v="${k}">${n}</button>`).join("")}</div>`)}
     ${!up && !i.thanked ? `<div class="fubox"><div class="grow small">Send a thank-you within 24 hours.</div><button class="btn sm" data-act="mail" data-id="${a.id}" data-k="thanks" data-iv="${i.id}">Write email</button><button class="btn sm ghost" data-act="thanked" data-iv="${i.id}">Sent</button></div>` : ""}`,
-    `<button class="btn" data-act="ivEdit" data-iv="${i.id}">Edit details</button>${up ? `<button class="btn" data-act="ivCal" data-iv="${i.id}">${i.cal ? "In calendar ✓" : "Add to calendar"}</button>` : ""}<button class="btn pri" data-act="close">Done</button>`, { wide: 620 });
+    `<button class="btn" data-act="ivEdit" data-iv="${i.id}">Edit details</button>${up ? `<button class="btn" data-act="ivCal" data-iv="${i.id}">${i.cal ? "In calendar ✓" : "Add to calendar"}</button>` : ""}<button class="btn pri" data-act="close">Done</button>`, { wide: 620, onClose: () => render() });      // prep count + notes on the page behind
 }
 
 // ------------------------------------------------------------ offers
@@ -1907,7 +1987,7 @@ function offerModal(id) {
 function offerSave(id) {
   const a = appById(id), n = x => num(val(x).replace(/[^\d.]/g, ""));
   commit(() => {
-    a.offer = { base: n("oB"), bonus: n("oBo"), equity: n("oEq"), perks: n("oPk"), pto: n("oPto"), deadline: val("oDl"), start: val("oSt"), notes: val("oNo"), scores: {} };
+    a.offer = { base: n("oB"), bonus: n("oBo"), equity: n("oEq"), perks: n("oPk"), pto: n("oPto"), deadline: D.ok(val("oDl")) ? val("oDl") : "", start: D.ok(val("oSt")) ? val("oSt") : "", notes: val("oNo"), scores: (a.offer && a.offer.scores) || Object.fromEntries(Object.keys(CRIT).map(k => [k, 3])) };
     if (!["offer", "accepted"].includes(a.status)) setStatus(a, "offer");
   }, "offer");
   closeModal(); toast("Offer saved.", () => go("offers"), "Compare");
@@ -1992,13 +2072,16 @@ function pasteFill() {
 function logRows(from, to) {
   const r = [];
   for (const a of S.apps) if (a.applied && a.applied >= from && a.applied <= to) r.push({ d: a.applied, kind: "Applied", who: a.company, what: a.role, how: METHOD[a.method] || (a.url ? "Online application" : ""), contact: [a.contact, a.email || a.phone, a.location].filter(Boolean).join(" · "), res: STATUS[a.status].n, a });
-  for (const i of S.interviews) { const a = appById(i.app); if (a && i.date >= from && i.date <= to && i.date <= today()) r.push({ d: i.date, kind: "Interview", who: a.company, what: `${IKIND[i.kind]} – ${a.role}`, how: i.where && !/^https?:/.test(i.where) ? "In person" : "Video / phone", contact: i.who, res: i.outcome === "passed" ? "Passed" : i.outcome === "rejected" ? "Not selected" : "Waiting" }); }
+  for (const i of S.interviews) { const a = appById(i.app); if (a && i.date >= from && i.date <= to && i.date <= today() && !ivOff(i)) r.push({ d: i.date, kind: "Interview", who: a.company, what: `${IKIND[i.kind]} – ${a.role}`, how: i.where && !/^https?:/.test(i.where) ? "In person" : "Video / phone", contact: i.who, res: i.outcome === "passed" ? "Passed" : i.outcome === "rejected" ? "Not selected" : "Waiting" }); }
   for (const x of S.acts) if (x.d >= from && x.d <= to) r.push({ d: x.d, kind: AKIND[x.kind], who: x.what, what: x.notes, how: "", contact: "", res: "Done", act: x });
   return r.sort((x, y) => x.d.localeCompare(y.d));
 }
 function vReport() {
   const t = today(), ws = D.weekStart(t), from = VS.rFrom || D.add(ws, -21), to = VS.rTo || D.add(ws, 6), rows = logRows(from, to), req = S.settings.logReq;
-  const weeks = []; for (let w = D.weekStart(from); w <= to; w = D.add(w, 7)) weeks.push({ w, n: logRows(w, D.add(w, 6)).length });
+  // one box per week, counted only inside the chosen From–To range (a cut-off week says so)
+  const weeks = []; for (let w = D.weekStart(from); w <= to; w = D.add(w, 7)) { const a = w < from ? from : w, b = D.add(w, 6) > to ? to : D.add(w, 6); weeks.push({ w, a, b, part: a !== w || b !== D.add(w, 6), n: logRows(a, b).length }); }
+  const wkLabel = w => w.part ? `${dshort(w.a)}${w.a !== w.b ? " – " + dshort(w.b) : ""}` : "week of " + dshort(w.w);
+  const wkState = w => !req ? "" : w.n >= req ? "ok" : w.w > t ? "up" : D.add(w.w, 6) >= t ? "now" : w.part ? "part" : "bad";
   const quick = [["This week", ws, D.add(ws, 6)], ["Last week", D.add(ws, -7), D.add(ws, -1)], ["Last 4 weeks", D.add(ws, -21), D.add(ws, 6)], ["This month", t.slice(0, 8) + "01", t]];
   const tbl = rows.length ? `<div class="scrollx"><table class="t log"><thead><tr><th>Date</th><th>Activity</th><th>Employer / event</th><th>Position / details</th><th>How</th><th>Contact</th><th>Result</th></tr></thead><tbody>${rows.map(r => `<tr class="${r.a ? "click" : r.act ? "click" : ""}" ${r.a ? `data-act="open" data-id="${r.a.id}"` : r.act ? `data-act="actEdit" data-id="${r.act.id}"` : ""}><td>${dshort(r.d)}</td><td>${esc(r.kind)}</td><td>${esc(r.who)}</td><td>${esc(r.what)}</td><td>${esc(r.how)}</td><td>${esc(r.contact)}</td><td>${esc(r.res)}</td></tr>`).join("")}</tbody></table></div>` : `<div class="empty">No job search activity in this period.</div>`;
   return topbar("Job search log", "", `<button class="btn" data-act="actEdit">${ic("plus")}Other activity</button><button class="btn pri" data-act="logPrint">Save as PDF</button>`) +
@@ -2006,7 +2089,7 @@ function vReport() {
     <div class="filters"><div class="seg">${quick.map(([n, f, e]) => `<button class="${from === f && to === e ? "on" : ""}" data-act="logRange" data-f="${f}" data-t="${e}">${n}</button>`).join("")}</div><input class="inp sm auto" type="date" data-vs2="rFrom" value="${from}"><span class="small muted">to</span><input class="inp sm auto" type="date" data-vs2="rTo" value="${to}">
     <span class="small muted" style="margin-left:auto">Required per week</span><input class="inp sm auto" style="width:64px" data-set="logReq" inputmode="numeric" value="${req}"></div>
     ${weeks.length > 1 ? `<div class="card mb16"><div class="body" style="padding-top:16px">${colChart([{ name: "Activities", color: CC[0], vals: weeks.map(w => w.n) }], weeks.map(w => dshort(w.w)), { h: 170, ref: req || 0, tipLabel: i => "Week of " + dshort(weeks[i].w), label: "Job search activities per week" })}</div></div>` : ""}
-    <div class="wkrow mb16">${weeks.map(w => `<div class="wkc ${req && w.n >= req ? "ok" : req && w.w <= t ? "bad" : ""}"><b>${w.n}</b><span>week of ${dshort(w.w)}</span>${req ? `<em>${w.n >= req ? "✓ enough" : w.w > t ? "upcoming" : `${req - w.n} missing`}</em>` : ""}</div>`).join("")}</div>
+    <div class="wkrow mb16">${weeks.map(w => { const k = wkState(w); return `<div class="wkc ${k === "ok" || k === "bad" ? k : ""}"><b>${w.n}</b><span>${wkLabel(w)}</span>${req ? `<em>${{ ok: "✓ enough", up: "upcoming", now: `${req - w.n} to go this week`, part: "part of a week", bad: `${req - w.n} missing` }[k]}</em>` : ""}</div>`; }).join("")}</div>
     ${card(`${plural(rows.length, "activity", "activities")}, ${dshort(from)} – ${dshort(to)}`, tbl, { right: `<button class="btn sm ghost" data-act="logCsv">Export CSV</button>` })}`;
 }
 function logPrint() {
@@ -2145,16 +2228,25 @@ function csvIn() {
     const rows = parseCSV(text); if (rows.length < 2) return toast("That file looks empty.");
     const r = importRows(rows); if (r.err) return modal("Couldn't read this file", `<p>${esc(r.err)}</p><p class="small muted">The first row must have column names, e.g. <b>Company</b>, <b>Job title</b>, <b>Status</b>, <b>Date applied</b>.</p>`, `<button class="btn pri" data-act="close">OK</button>`);
     IMP = r.apps;
+    const dupNote = r.dups ? `<p class="small muted">${plural(r.dups, "job is", "jobs are")} already in your tracker (same company, job title and date applied) – skipped, so nothing is doubled.</p>` : "";
+    if (!IMP.length) return modal("Already imported", `<p>Every job in this file is already in your tracker – nothing to add.</p>${dupNote}`, `<button class="btn pri" data-act="close">OK</button>`);
     const known = rows[0].filter((h, i) => r.head[i]).map(h => `<span class="kw ok">${esc(h)}</span>`).join(""), skip = rows[0].filter((h, i) => !r.head[i] && h.trim()).map(h => `<span class="kw">${esc(h)}</span>`).join("");
     const by = {}; IMP.forEach(a => by[a.status] = (by[a.status] || 0) + 1);
-    modal(`Import ${plural(IMP.length, "job")}?`, `<p class="small">Found: ${Object.entries(by).map(([k, n]) => `${n} ${STATUS[k].n.toLowerCase()}`).join(" · ")}</p><div class="caps mt">Columns recognized</div><div class="kws">${known}</div>${skip ? `<div class="caps mt">Skipped (kept nowhere)</div><div class="kws">${skip}</div>` : ""}
+    modal(`Import ${plural(IMP.length, "job")}?`, `<p class="small">Found: ${Object.entries(by).map(([k, n]) => `${n} ${STATUS[k].n.toLowerCase()}`).join(" · ")}</p>${dupNote}<div class="caps mt">Columns recognized</div><div class="kws">${known}</div>${skip ? `<div class="caps mt">Skipped (kept nowhere)</div><div class="kws">${skip}</div>` : ""}
       <div class="list mt">${IMP.slice(0, 5).map(a => `<div class="item">${logo(a, "sm")}<div class="grow small"><b>${esc(a.company)}</b> · ${esc(a.role)}</div>${stBadge(a.status)}</div>`).join("")}</div>${IMP.length > 5 ? `<p class="tiny faint">…and ${IMP.length - 5} more</p>` : ""}`,
       `<button class="btn" data-act="close">Cancel</button><button class="btn pri" data-act="csvOk">${ic("check")}Import</button>`, { wide: 560 });
   });
 }
 function csvOk() {
-  const n = IMP.length;
-  commit(() => { S.apps = migrate({ ...S, apps: [...IMP, ...S.apps] }).apps; IMP.forEach(a => { if (a.status === "applied" && !a.follow) a.follow = D.add(a.applied || today(), S.settings.followDays); }); if (!S.setup) { obCollect(); S.setup = true; } }, "import");
+  if (!IMP || !IMP.length) return closeModal();
+  const n = IMP.length, ids = new Set(IMP.map(a => a.id));
+  commit(() => {
+    S.apps = migrate({ ...S, apps: [...IMP, ...S.apps] }).apps;
+    // a follow-up reminder for every imported "Applied" job (on the jobs that are now in the tracker)
+    S.apps.forEach(a => { if (ids.has(a.id) && a.status === "applied" && !a.follow) a.follow = D.add(a.applied || today(), S.settings.followDays); });
+    if (!S.setup) { obCollect(); S.setup = true; }
+  }, "import");
+  IMP = null;
   closeModal(); go("board"); toast(`${plural(n, "job")} imported.`, () => undo());
 }
 function csvOut() { if (DEMO) return toast("Export works in the full app."); download(`job-search-${today()}.csv`, exportCSV(), "text/csv"); }
@@ -2177,7 +2269,9 @@ function icsAll() {
   const t = today(), list = events(t, D.add(t, 365)).filter(e => e.k !== "ap");
   if (!list.length) return toast("Nothing coming up to add yet.");
   if (DEMO) return toast(`In the full app this adds ${plural(list.length, "event")} to your phone's calendar – with reminders.`);
-  download(`job-search-${t}.ics`, ics(list), "text/calendar");
+  // interviews of jobs you closed: sent as cancelled, so an earlier export doesn't leave them on your phone
+  const off = S.interviews.filter(i => i.date >= t && ivOff(i) && appById(i.app)).map(i => { const a = appById(i.app); return { k: "iv", d: i.date, a, i, time: i.time, t: `${IKIND[i.kind]} · ${a.company}` }; });
+  download(`job-search-${t}.ics`, ics(list, off), "text/calendar");
   modal("Calendar file ready", `<p class="small">${plural(list.length, "event")} with reminders – interviews, deadlines, follow-ups and offer replies.</p><ul class="small tight"><li><b>iPhone:</b> tap the downloaded file › <b>Add All</b>.</li><li><b>Google Calendar:</b> calendar.google.com › Settings › <b>Import</b> › choose the file.</li><li><b>Outlook / Mac:</b> double-click the file.</li></ul><p class="tiny faint">Changed something later? Add the file again – existing events are updated, not doubled.</p>`, `<button class="btn pri" data-act="close">Got it</button>`);
 }
 
@@ -2207,12 +2301,12 @@ const ACT = {
   close: () => closeModal(), undo: () => undo(), more: () => moreSheet(),
   addApp: () => appModal(), appEdit: d => appModal(d.id), appSave: d => appSave(d.id), pasteAdd: () => appModal(null, { paste: true }), pasteFill: () => pasteFill(),
   appDel: d => { const a = appById(d.id); commit(() => { S.apps = S.apps.filter(x => x.id !== d.id); S.interviews = S.interviews.filter(i => i.app !== d.id); }, "delete job"); closeModal(); toast(`${esc(a.company)} deleted.`, () => undo()); },
-  fSt: (d, el) => { FORM.status = d.v; el.parentNode.querySelectorAll("button").forEach(b => b.classList.toggle("on", b === el)); if (d.v !== "wish" && $("#fAp") && !$("#fAp").value) $("#fAp").value = today(); },
+  fSt: (d, el) => { FORM.status = d.v; el.parentNode.querySelectorAll("button").forEach(b => b.classList.toggle("on", b === el)); const ap = $("#fAp"); if (ap) { if (d.v === "wish") { if (ap.value) ap.dataset.was = ap.value; ap.value = ""; } else if (!ap.value) ap.value = ap.dataset.was || today(); } },
   fInt: (d, el) => { FORM.interest = +d.v; el.parentNode.querySelectorAll("button").forEach(b => b.classList.toggle("on", b === el)); },
   fMore: () => { $("#fMore").classList.remove("hidden"); $("#fMoreBtn").classList.add("hidden"); },
   open: d => openApp(d.id, d.tab), dTab: d => { DT.tab = d.v; drawDetail(); },
   mark: d => markStatus(d.id, d.s),
-  followDone: d => { const a = appById(d.id); commit(() => { a.followed.push(today()); a.follow = D.add(today(), S.settings.followDays); }, "follow-up"); refresh(); toast(`Next follow-up for ${esc(a.company)} ${rel(a.follow)}.`, () => undo()); },
+  followDone: d => { const a = appById(d.id); commit(() => { if (a.followed[a.followed.length - 1] !== today()) a.followed.push(today()); a.follow = D.add(today(), S.settings.followDays); }, "follow-up"); refresh(); toast(`Next follow-up for ${esc(a.company)} ${rel(a.follow)}.`, () => undo()); },
   thanked: d => { commit(() => { ivById(d.iv).thanked = true; }, "thank-you"); refresh(); toast("Marked as sent.", () => undo()); },
   // emails
   mail: d => mailModal(d.id, d.k, d.iv), mailCopy: async () => { const ok = await copyText(`Subject: ${val("mSu")}\n\n${$("#mBo").value}`); toast(ok ? "Copied – paste it into your email." : "Couldn't copy – select the text and copy it."); if (ok) mailSent(); },
@@ -2261,12 +2355,15 @@ const ACT = {
 // every status change goes through here
 function markStatus(id, s) {
   const a = appById(id); if (!a || a.status === s) return;
+  const ivUp = appIvs(id).filter(i => i.outcome === "pending" && i.date >= today() && !ivOff(i));
   commit(() => setStatus(a, s), STATUS[s].n.toLowerCase());
   refresh();
   if (s === "applied") toast(`Applied to ${esc(a.company)}. Follow-up reminder ${rel(a.follow)}.`, () => undo());
   else if (s === "interview") toast(`Interview at ${esc(a.company)}.`, () => { closeModal(); ivModal(null, id); }, "Add date");
   else if (s === "offer") { confetti(); toast(`An offer from ${esc(a.company)}. Congratulations!`, () => offerModal(id), "Add details"); }
   else if (s === "accepted") { confetti(); toast("Congratulations on the new job!", () => undo()); }
+  else if (s === "wish") toast(`${esc(a.company)} is back on your wishlist – not counted as applied.`, () => undo());
+  else if (CLOSED.includes(s) && ivUp.length) toast(`${esc(a.company)}: ${STATUS[s].n}. ${ivUp.length === 1 ? "Its upcoming interview is" : ivUp.length + " upcoming interviews are"} off your plan${ivUp.some(i => i.cal) ? " – delete it from your phone's calendar too" : ""}.`, () => undo());
   else toast(`${esc(a.company)}: ${STATUS[s].n}`, () => undo());
 }
 // calendar: pick Apple/Outlook (.ics file) or Google Calendar
